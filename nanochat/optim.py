@@ -9,10 +9,25 @@ Adapted from: https://github.com/KellerJordan/modded-nanogpt
 Further contributions from @karpathy and @chrisjmccormick.
 """
 
+import os
+import sys
+
 import torch
 import torch.distributed as dist
 from torch import Tensor
 from nanochat.common import COMPUTE_DTYPE
+
+
+def compile_optimizer_step(fn):
+    """Compile optimizer kernels where Triton is supported; retain an eager fallback on Windows.
+
+    Nanochat's fused optimizer helpers are ordinary PyTorch tensor programs, so eager
+    execution remains correct. Windows PyTorch builds commonly lack a working Triton
+    installation, making torch.compile fail at the first optimizer step.
+    """
+    if sys.platform == "win32" or os.environ.get("NANOCHAT_EAGER_OPTIMIZER") == "1":
+        return fn
+    return torch.compile(fn, dynamic=False, fullgraph=True)
 
 # -----------------------------------------------------------------------------
 """
@@ -20,7 +35,7 @@ Good old AdamW optimizer, fused kernel.
 https://arxiv.org/abs/1711.05101
 """
 
-@torch.compile(dynamic=False, fullgraph=True)
+@compile_optimizer_step
 def adamw_step_fused(
     p: Tensor,              # (32768, 768) - parameter tensor
     grad: Tensor,           # (32768, 768) - gradient, same shape as p
@@ -108,7 +123,7 @@ polar_express_coeffs = [
 ]
 
 
-@torch.compile(dynamic=False, fullgraph=True)
+@compile_optimizer_step
 def muon_step_fused(
     stacked_grads: Tensor,          # (12, 768, 3072) - stacked gradients
     stacked_params: Tensor,         # (12, 768, 3072) - stacked parameters

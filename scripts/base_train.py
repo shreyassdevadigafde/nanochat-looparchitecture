@@ -43,11 +43,14 @@ parser = argparse.ArgumentParser(description="Pretrain base model")
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
+parser.add_argument("--no-compile", action="store_true", help="disable torch.compile (useful for short experiments and constrained GPUs)")
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU)")
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
 # Model architecture
 parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model")
+parser.add_argument("--loop-count", type=int, default=1, help="number of times to reuse the physical Transformer stack (effective depth = depth * loop-count)")
+parser.add_argument("--deeploop", action="store_true", help="use the DeepLoop Post-LN residual and initialization rule (requires fresh training)")
 parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = depth * aspect_ratio")
 parser.add_argument("--head-dim", type=int, default=128, help="target head dimension for attention")
 parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
@@ -136,7 +139,8 @@ def build_model_meta(depth):
     config = GPTConfig(
         sequence_len=args.max_seq_len, vocab_size=vocab_size,
         n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
-        window_pattern=args.window_pattern,
+        window_pattern=args.window_pattern, loop_count=args.loop_count,
+        use_deeploop=args.deeploop,
     )
     with torch.device("meta"):
         model_meta = GPT(config)
@@ -147,12 +151,20 @@ model = build_model_meta(args.depth) # 1) Build on meta device (only shapes/dtyp
 model_config = model.config
 model_config_kwargs = asdict(model_config)
 print0(f"Model config:\n{json.dumps(model_config_kwargs, indent=2)}")
+print0(f"Physical depth: {args.depth}; loop count: {args.loop_count}; effective depth: {model.effective_n_layer}")
+if args.deeploop:
+    print0("DeepLoop enabled: using loop-aware Post-LN residual scaling; Nanochat residual extras are disabled.")
 model.to_empty(device=device) # 2) All tensors get storage on target device but with uninitialized (garbage) data
 model.init_weights() # 3) All tensors get initialized
 
 # If we are resuming, overwrite the model parameters with those of the checkpoint
 base_dir = get_base_dir()
-output_dirname = args.model_tag if args.model_tag else f"d{args.depth}" # e.g. d12
+default_model_tag = f"d{args.depth}"
+if args.loop_count > 1:
+    default_model_tag += f"r{args.loop_count}"
+if args.deeploop:
+    default_model_tag += "-deeploop"
+output_dirname = args.model_tag if args.model_tag else default_model_tag
 checkpoint_dir = os.path.join(base_dir, "base_checkpoints", output_dirname)
 resuming = args.resume_from_step != -1
 if resuming:
@@ -243,7 +255,10 @@ def disable_fp8(model):
 # Compile the model
 
 orig_model = model # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
-model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
+if args.no_compile:
+    print0("torch.compile disabled")
+else:
+    model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
 
 # -----------------------------------------------------------------------------
 # Scaling laws and muP extrapolations to determine the optimal training horizon, batch size, learning rates, weight decay.

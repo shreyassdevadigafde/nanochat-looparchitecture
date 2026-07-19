@@ -193,7 +193,13 @@ class Engine:
 
         # 1) Run a batch 1 prefill of the prompt tokens
         m = self.model.config
-        kv_model_kwargs = {"num_heads": m.n_kv_head, "head_dim": m.n_embd // m.n_head, "num_layers": m.n_layer}
+        # Looped models share block weights, but each repeat is a separate logical
+        # layer with its own keys and values.
+        kv_model_kwargs = {
+            "num_heads": m.n_kv_head,
+            "head_dim": m.n_embd // m.n_head,
+            "num_layers": m.n_layer * getattr(m, "loop_count", 1),
+        }
         kv_cache_prefill = KVCache(
             batch_size=1,
             seq_len=len(tokens),

@@ -25,9 +25,18 @@ def _patch_missing_config_keys(model_config_kwargs):
     if "window_pattern" not in model_config_kwargs:
         model_config_kwargs["window_pattern"] = "L"
         log0(f"Patching missing window_pattern in model config to 'L'")
+    if "loop_count" not in model_config_kwargs:
+        model_config_kwargs["loop_count"] = 1
+        log0("Patching missing loop_count in model config to 1")
+    if "use_deeploop" not in model_config_kwargs:
+        model_config_kwargs["use_deeploop"] = False
+        log0("Patching missing use_deeploop in model config to False")
 
 def _patch_missing_keys(model_data, model_config):
     """Add default values for new parameters that may be missing in old checkpoints."""
+    # DeepLoop models intentionally do not contain Nanochat's residual extras.
+    if model_config.use_deeploop:
+        return
     n_layer = model_config.n_layer
     # resid_lambdas defaults to 1.0 (identity scaling)
     if "resid_lambdas" not in model_data:
